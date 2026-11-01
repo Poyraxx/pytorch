@@ -3312,6 +3312,9 @@ class TestPredispatchSerialization(TestCase):
             "dict": set_last(
                 arg={"as_string_to_argument": {"f": {"as_operator": "torch.os.system"}}}
             ),
+            "custom_obj": set_last(
+                arg={"as_custom_obj": {"name": "obj0", "class_fqn": "a.b"}}
+            ),
             "keyword": set_last(arg={"as_int": 0}, kind=2),
             "named": set_last(name="checked_output"),
             # Called directly, the helper would import the module of the class
@@ -3327,6 +3330,7 @@ class TestPredispatchSerialization(TestCase):
             ("helper", "outside torch.ops"),
             ("higher_order_op", "not an operator overload"),
             ("dict", "of kind as_string_to_argument"),
+            ("custom_obj", "of kind as_custom_obj"),
             ("keyword", "keyword input"),
             ("named", "keyword input"),
             ("direct_helper_call", "not a class or function defined"),
