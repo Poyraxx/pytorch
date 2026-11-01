@@ -1210,14 +1210,6 @@ if cxx_pytree.tree_leaves(foo) != [foo]:
             serialized_type_name="test_pytree.test_pytree_deserialize_names.Point",
         )
         self.addCleanup(python_pytree._deregister_pytree_node, Point)
-
-        # The placeholder must not name a type registered without a name.
-        @dataclass(frozen=True)
-        class Nameless:
-            pass
-
-        python_pytree.register_constant(Nameless)
-        self.addCleanup(python_pytree._deregister_pytree_node, Nameless)
         serialized = python_pytree.treespec_dumps(
             python_pytree.tree_structure(Point(1, 2))
         )

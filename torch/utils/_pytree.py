@@ -912,7 +912,12 @@ def _namedtuple_serialize(context: Context) -> DumpableContext:
 
 
 def _namedtuple_deserialize(dumpable_context: DumpableContext) -> Context:
-    if dumpable_context not in SERIALIZED_TYPE_TO_PYTHON_TYPE:
+    # The name that stands for every type without a serialized name may map
+    # to any of them.
+    if (
+        dumpable_context not in SERIALIZED_TYPE_TO_PYTHON_TYPE
+        or dumpable_context == NO_SERIALIZED_TYPE_NAME_FOUND
+    ):
         raise NotImplementedError(
             f"Can't deserialize TreeSpec of namedtuple class {dumpable_context} "
             "because we couldn't find a serialized name."
