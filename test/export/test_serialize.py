@@ -2690,6 +2690,11 @@ def _call_helper_directly_with(arg, **fields):
     return change
 
 
+def _drop_last_flat_input(node):
+    # The input spec then has one leaf more than the call has flat inputs.
+    node.args = node.args[:-1]
+
+
 def _call_helper_in_graph(args_of):
     # The same direct call, made in the graph before it is saved.
     def change(node):
@@ -3404,6 +3409,7 @@ class TestPredispatchSerialization(TestCase):
             lambda node: node.update_arg(-1, torch.ops.higher_order.cond),
             "not an operator overload",
         ),
+        "leaf_count": (_drop_last_flat_input, "flat inputs, but its input spec"),
         "direct_helper_call": (
             _call_helper_in_graph(lambda args: ("os.system", *args[3:])),
             "not a class or function defined",
