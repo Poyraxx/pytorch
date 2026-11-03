@@ -2955,7 +2955,7 @@ class TestPredispatchSerialization(TestCase):
                 pass
 
             Local.__module__ = TwoTensor.__module__
-            with self.assertRaisesRegex(SerializeError, "not a top-level"):
+            with self.assertRaisesRegex(SerializeError, "Only top-level classes"):
                 torch.export.save(builds(Local), io.BytesIO())
 
         with self.subTest("name that finds a different class"):
@@ -3118,7 +3118,9 @@ class TestPredispatchSerialization(TestCase):
         with self.assertRaisesRegex(RuntimeError, "error when deserializing") as cm:
             torch.export.load(buffer)
         self.assertIsInstance(cm.exception.__cause__, SerializeError)
-        self.assertIn("import that module before loading", str(cm.exception.__cause__))
+        self.assertIn(
+            f"{module.__name__} is not an imported module", str(cm.exception.__cause__)
+        )
 
     @staticmethod
     def _index_in_vmap_program():
@@ -3261,7 +3263,8 @@ class TestPredispatchSerialization(TestCase):
         "replaced,name,reason",
         [
             subtest(
-                ("function", "flat_apply_side_effect.F", "not a top-level"), name="new"
+                ("function", "flat_apply_side_effect.F", "not an imported module"),
+                name="new",
             ),
             subtest(
                 ("function", "flat_apply_holder.lazy", "not a class or function"),
@@ -3272,7 +3275,8 @@ class TestPredispatchSerialization(TestCase):
                 name="getattr",
             ),
             subtest(
-                ("class", "flat_apply_side_effect.F", "not a top-level"), name="class"
+                ("class", "flat_apply_side_effect.F", "not an imported module"),
+                name="class",
             ),
         ],
     )
