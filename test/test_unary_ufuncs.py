@@ -19,6 +19,7 @@ from torch.testing._internal.common_device_type import (
     dtypesIfMPS,
     expectedFailureMPS,
     expectedFailureMPSComplex,
+    expectedFailureXPU,
     instantiate_device_type_tests,
     largeTensorTest,
     onlyAccelerator,
@@ -722,6 +723,7 @@ class TestUnaryUfuncs(TestCase):
         ):
             torch.polygamma(-1, torch.tensor([1.0, 2.0], device=device))
 
+    @expectedFailureXPU  # XPU angle(-0.0) returns 0 instead of pi; intel/torch-xpu-ops#5924
     @dtypes(torch.float16, torch.bfloat16, torch.float32, torch.float64)
     def test_angle_signed_zero(self, device, dtype):
         x = torch.tensor([-0.0, 0.0, -1.0, 1.0, nan], device=device, dtype=dtype)
@@ -1589,15 +1591,6 @@ class TestUnaryUfuncs(TestCase):
             ):
                 torch_op(t, out=out)
 
-    # abs_xpu is not implemented for Float8_e5m2, which is the only fp8 dtype
-    # whose isinf path relies on abs, so skip it on XPU.
-    # See intel/torch-xpu-ops/issues/5559
-    @dtypesIfXPU(
-        torch.float8_e4m3fn,
-        torch.float8_e4m3fnuz,
-        torch.float8_e5m2fnuz,
-        torch.float8_e8m0fnu,
-    )
     @dtypes(*float8_types_and(torch.float8_e8m0fnu))
     @dtypesIfMPS(torch.float8_e4m3fn)
     def test_isinf_isfinite_float8(self, device, dtype):
