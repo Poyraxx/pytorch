@@ -410,10 +410,9 @@ Tensor FunctionalInverses::unfold_inverse(const Tensor& base, const Tensor& muta
       return mutated_view.as_strided_symint(
           base.sym_sizes(), base.sym_strides(), base.sym_storage_offset());
     } else {
-      // I think autograd and the functionalization pass want the exact same thing here, but need to test to confirm.
-      // unfold_backward() is safe to use here because it is NOT a view op.
-      // (note: technically, we'll have an extra memory copy.
-      // We'd need to add an aliasing version of unfold_backward to fix that though).
+      // unfold_backward() is not a view op, so it is safe to use here (at the cost of an extra copy).
+      // It matches the autograd formula: elements of base that no window covers come out as 0, and
+      // elements covered by several windows are summed.
       TORCH_CHECK(
         !(inverse_return_mode == InverseReturnMode::ViewOrScatterInverse && size > step),
         "While executing unfold, functionalization encountered a tensor being mutated that has internal overlap. \
@@ -422,15 +421,14 @@ as the behavior is not well defined. Consider cloning the tensor before mutating
 or removing the mutation from your model."
           );
       if (base.dim() > 0 && size <= step) {
-        // The windows are disjoint, so the unfold is a plain strided view of base.
-        // unfold_backward would zero the elements of base that no window covers.
+        // The windows are disjoint. If they leave gaps, keep the elements of base that no window covers.
         const auto dim = at::maybe_wrap_dim(dimension, base.dim());
-        auto strides = base.sym_strides().vec();
-        const auto dim_stride = strides[dim];
-        strides[dim] = dim_stride * step;
-        strides.push_back(dim_stride);
-        return base.as_strided_scatter_symint(
-            mutated_view, mutated_view.sym_sizes(), strides, base.sym_storage_offset());
+        const auto has_gap = (mutated_view.sym_size(dim) * size).sym_ne(base.sym_size(dim));
+        if (TORCH_GUARD_OR_TRUE(has_gap)) {
+          const auto covered = unfold_backward(
+              at::ones_like(mutated_view, mutated_view.options().dtype(at::kBool)), base.sizes(), dimension, size, step);
+          return at::where(covered, unfold_backward(mutated_view, base.sizes(), dimension, size, step), base);
+        }
       }
       return unfold_backward(mutated_view, base.sizes(), dimension, size, step);
     }
