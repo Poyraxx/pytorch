@@ -31,6 +31,10 @@ WorkNCCL::WorkStatus WorkNCCLQueue::garbageCollectLocked(
       } else if (
           status == WorkNCCL::WorkStatus::TIMEDOUT ||
           status == WorkNCCL::WorkStatus::ERROR) {
+        // Cancelled by reconfigure(), not a failure: left for finalize().
+        if (work.state->generationState->invalidated) {
+          break;
+        }
         // Return the error status immediately
         finished.push_back(work.state);
         return status;
@@ -128,6 +132,30 @@ WorkNCCL::WorkStatus WorkNCCLQueue::finalize() {
     completedInputTensors.pop();
   }
   return status;
+}
+
+void WorkNCCLQueue::failPendingGeneration(
+    int64_t reconfigure_uuid,
+    const std::exception_ptr& exception) {
+  std::vector<std::shared_ptr<WorkNCCL::State>> pending;
+  {
+    std::lock_guard<std::mutex> lock(work_queues_mutex_);
+    for (const auto& [_, queued_works] : stream_work_queues_) {
+      auto work_queue = queued_works;
+      while (!work_queue.empty()) {
+        const auto& state = work_queue.front().state;
+        if (state->reconfigureUuid == reconfigure_uuid) {
+          pending.push_back(state);
+        }
+        work_queue.pop();
+      }
+    }
+  }
+
+  for (const auto& state : pending) {
+    state->setTerminalStatus(WorkNCCL::WorkStatus::ERROR, exception);
+    state->publishResult();
+  }
 }
 
 void WorkNCCLQueue::enqueueWork(

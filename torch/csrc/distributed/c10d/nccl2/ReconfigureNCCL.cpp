@@ -25,6 +25,7 @@
 #include <variant>
 
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/util/ScopeExit.h>
 #include <c10/util/env.h>
 #include <c10/util/irange.h>
 #include <torch/csrc/distributed/c10d/PrefixStore.hpp>
@@ -352,7 +353,11 @@ c10::intrusive_ptr<::c10d::Work> makeCompletedWork() {
 
 c10::intrusive_ptr<::c10d::Work> ProcessGroupNCCL::reconfigure(
     const ::c10d::ReconfigureOptions& opts) {
-  std::lock_guard reconfigureLock(reconfigure_mutex_);
+  std::unique_lock reconfigureLock(reconfigure_mutex_);
+  std::unique_lock admissionLock(collective_admission_mutex_, std::defer_lock);
+  TORCH_CHECK(
+      !reconfiguring_.load(std::memory_order_acquire),
+      "ProcessGroupNCCL reconfigure is already in progress");
   TORCH_CHECK(
       init_state_ != InitializationState::FINALIZED,
       "ProcessGroupNCCL has been finalized");
@@ -447,6 +452,70 @@ c10::intrusive_ptr<::c10d::Work> ProcessGroupNCCL::reconfigure(
   // process-group config normally uses blocking NCCL calls.
   config.blocking = 0;
 
+  const bool hadInitializedComm =
+      init_state_ == InitializationState::INITIALIZED;
+  const auto oldUuid = reconfigure_uuid_;
+  reconfiguring_.store(true, std::memory_order_release);
+  // On failure from here on, leave the group uninitialized and retryable.
+  auto onFailure = c10::make_scope_exit([&] {
+    try {
+      {
+        std::lock_guard generationLock(work_generation_state_->mutex);
+        work_generation_state_->invalidated = true;
+      }
+      if (hadInitializedComm) {
+        failPendingGeneration(oldUuid);
+      }
+    } catch (const std::exception& e) {
+      TC_LOG(ERROR, this) << "Failed to cancel work after reconfigure failure: "
+                          << e.what();
+    }
+    if (!admissionLock.owns_lock()) {
+      if (reconfigureLock.owns_lock()) {
+        reconfigureLock.unlock();
+      }
+      admissionLock.lock();
+    }
+    if (!reconfigureLock.owns_lock()) {
+      reconfigureLock.lock();
+    }
+    try {
+      stopWatchdog();
+      if (nccl_comm_) {
+        detachMemoryHook();
+        retireComm();
+        ncclComm_t comm = nullptr;
+        {
+          std::lock_guard commLock(revoke_mutex_);
+          comm = std::exchange(nccl_comm_, nullptr);
+        }
+        abortCommIgnoringErrors(
+            *nccl_api_,
+            comm,
+            timeout,
+            "NCCL commAbort failed after reconfigure failure");
+      }
+    } catch (const std::exception& e) {
+      TC_LOG(ERROR, this) << "Failed to clean up after reconfigure failure: "
+                          << e.what();
+    }
+    try {
+      // After the abort, so no kernel still uses the queued work's inputs.
+      workq_.finalize();
+    } catch (const std::exception& e) {
+      TC_LOG(ERROR, this) << "Failed to drain work after reconfigure failure: "
+                          << e.what();
+    }
+    init_state_ = InitializationState::UNINITIALIZED;
+    reconfigure_uuid_ = -1;
+    comm_state_ = CommState::ERROR;
+    work_generation_state_ = std::make_shared<WorkNCCL::GenerationState>();
+    reconfiguring_.store(false, std::memory_order_release);
+  });
+
+  // A failing launch takes reconfigure_mutex_ while admitted; drop it first.
+  reconfigureLock.unlock();
+
   // Tear down the previous communicator generation: stop the watchdog, revoke
   // in-flight work, drain the work queue, and abort the comm unless it is
   // shrunk below. Port of the pre-reconfigure cleanup in torchcomms'
@@ -455,10 +524,43 @@ c10::intrusive_ptr<::c10d::Work> ProcessGroupNCCL::reconfigure(
   // avoid a concurrent second commRevoke on the same communicator. Done even
   // if a previous initialization failed after starting the watchdog.
   stopWatchdog();
+  const bool drained = admissionLock.try_lock();
+  if (drained) {
+    admissionLock.unlock();
+  }
+  auto workStatus = WorkNCCL::WorkStatus::COMPLETED;
+  if (hadInitializedComm) {
+    // Before the cutoff, so work that already finished succeeds.
+    workStatus = workq_.garbageCollect();
+  }
+  {
+    std::lock_guard generationLock(work_generation_state_->mutex);
+    work_generation_state_->invalidated = true;
+  }
+  if (!drained) {
+    // A submission may be stuck in its launch until the op timeout; revoke it.
+    // After the cutoff: a revoked kernel's end event fires.
+    if (hadInitializedComm) {
+      std::lock_guard commLock(revoke_mutex_);
+      if (nccl_comm_ && !revoked_.exchange(true)) {
+        NCCL_CHECK_IGNORE(
+            nccl_api_,
+            nccl_api_->commRevoke(nccl_comm_),
+            "NCCL commRevoke failed during reconfigure");
+      }
+    }
+    admissionLock.lock();
+    admissionLock.unlock();
+  }
+  if (hadInitializedComm) {
+    // No locks held: result callbacks may re-enter this process group.
+    failPendingGeneration(oldUuid);
+  }
+  admissionLock.lock();
+  reconfigureLock.lock();
   std::unique_lock revokeLock(revoke_mutex_);
   ncclComm_t oldComm = nullptr;
   if (init_state_ == InitializationState::INITIALIZED) {
-    auto workStatus = workq_.garbageCollect();
     if (nccl_comm_ && !revoked_.exchange(true) &&
         (workStatus == WorkNCCL::WorkStatus::NOT_STARTED ||
          workStatus == WorkNCCL::WorkStatus::INPROGRESS)) {
@@ -470,7 +572,6 @@ c10::intrusive_ptr<::c10d::Work> ProcessGroupNCCL::reconfigure(
 
     detachMemoryHook();
     retireComm();
-    workq_.finalize();
 
     oldComm = std::exchange(nccl_comm_, nullptr);
     init_state_ = InitializationState::UNINITIALIZED;
@@ -544,6 +645,8 @@ c10::intrusive_ptr<::c10d::Work> ProcessGroupNCCL::reconfigure(
     nccl_comm_ = newComm;
   }
 
+  // The old communicator is gone, so no kernel still uses these inputs.
+  workq_.finalize();
   initNcclResources();
   init_state_ = InitializationState::INITIALIZED;
   TORCH_CHECK(
@@ -557,6 +660,9 @@ c10::intrusive_ptr<::c10d::Work> ProcessGroupNCCL::reconfigure(
       " of ",
       newSize);
   reconfigure_uuid_ = opts.uuid;
+  work_generation_state_ = std::make_shared<WorkNCCL::GenerationState>();
+  reconfiguring_.store(false, std::memory_order_release);
+  onFailure.release();
 
   TC_LOG(INFO, this) << "ProcessGroupNCCL reconfigure completed for rank: "
                      << rank_;

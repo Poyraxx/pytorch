@@ -760,7 +760,9 @@ void ProcessGroupNCCL::handleBlockingWaitFailure(
     WorkNCCL::WorkStatus status,
     int64_t reconfigure_uuid) {
   std::lock_guard reconfigureLock(reconfigure_mutex_);
-  if (reconfigure_uuid_ != reconfigure_uuid) {
+  // A reconfigure() in progress is tearing this communicator down anyway.
+  if (reconfigure_uuid_ != reconfigure_uuid ||
+      reconfiguring_.load(std::memory_order_acquire)) {
     return;
   }
   comm_state_ = status == WorkNCCL::WorkStatus::TIMEDOUT ? CommState::TIMEOUT

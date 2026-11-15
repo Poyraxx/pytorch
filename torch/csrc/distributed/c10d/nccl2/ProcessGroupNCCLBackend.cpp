@@ -1106,8 +1106,19 @@ c10::intrusive_ptr<::c10d::Work> ProcessGroupNCCL::endCoalescing() {
   for (const auto& w : works) {
     timeout = std::max(timeout, w->getTimeout());
   }
+  auto admission = admitCollective();
+  TORCH_CHECK_WITH(
+      DistBackendError,
+      std::all_of(
+          works.begin(),
+          works.end(),
+          [this](const auto& w) {
+            return w->state_->generationState == work_generation_state_;
+          }),
+      "Coalesced operations crossed a ProcessGroupNCCL reconfigure");
   auto work = c10::make_intrusive<WorkNCCL>(
       this, stream, timeout, std::vector<at::Tensor>{});
+  work->submissionLock_ = std::move(admission);
   work->setSequenceNumber(works.back()->getSequencenumber());
   work->setDurationStart(*works.front());
   // Under graph capture nothing else may hold the inputs once the caller drops

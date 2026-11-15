@@ -6,10 +6,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <shared_mutex>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -141,6 +143,11 @@ class WorkNCCL : public c10d::Work {
 
  private:
   struct Events;
+  // Once invalidated, no Work of this generation can complete successfully.
+  struct GenerationState {
+    std::mutex mutex;
+    std::atomic<bool> invalidated{false};
+  };
   struct InputTensorShelf {
     explicit InputTensorShelf(std::vector<at::Tensor> tensors);
     void append(InputTensorShelf& other);
@@ -158,7 +165,9 @@ class WorkNCCL : public c10d::Work {
 
     WorkStatus status() const;
     std::exception_ptr exception() const;
-    bool setTerminalStatus(WorkStatus status);
+    bool setTerminalStatus(
+        WorkStatus status,
+        const std::exception_ptr& exception = nullptr);
     // Returns ownedEphemeralTimeout to the comm, at most once.
     void releaseEphemeralTimeout();
     WorkStatus checkStatus(
@@ -187,6 +196,7 @@ class WorkNCCL : public c10d::Work {
     std::exception_ptr workException;
     c10::intrusive_ptr<c10::ivalue::Future> futureWorkResult;
     std::atomic<bool> resultPublished{false};
+    std::shared_ptr<GenerationState> generationState;
     bool hostBlocking{false};
   };
   struct TrackedWork {
@@ -203,6 +213,8 @@ class WorkNCCL : public c10d::Work {
   void synchronizeInternal();
 
   std::shared_ptr<State> state_;
+  // Admission, held from createWork() until enqueueWork() queues this work.
+  std::shared_lock<std::shared_mutex> submissionLock_;
   std::shared_ptr<InputTensorShelf> inputTensors_;
   std::vector<at::Tensor> outputs_;
   std::optional<at::RecordFunction> recordFunction_;
@@ -218,6 +230,10 @@ class WorkNCCLQueue {
   WorkNCCL::WorkStatus garbageCollect();
   // Finalize function can only be called from the main thread
   WorkNCCL::WorkStatus finalize();
+  // Fails a retired generation's pending work; finalize() dequeues it.
+  void failPendingGeneration(
+      int64_t reconfigure_uuid,
+      const std::exception_ptr& exception);
   void enqueueWork(
       const c10::intrusive_ptr<WorkNCCL>& work,
       cudaStream_t stream);

@@ -129,7 +129,8 @@ WorkNCCL::State::State(
       events(std::make_shared<Events>(comm->getEventPool(), timingEnabled)),
       durationStartEvents(events),
       futureWorkResult(
-          c10::make_intrusive<c10::ivalue::Future>(c10::AnyEnumType::get())) {}
+          c10::make_intrusive<c10::ivalue::Future>(c10::AnyEnumType::get())),
+      generationState(comm->work_generation_state_) {}
 
 WorkNCCL::WorkNCCL(
     ProcessGroupNCCL* comm,
@@ -184,12 +185,22 @@ void WorkNCCL::recordEnd() {
   }
 }
 
-bool WorkNCCL::State::setTerminalStatus(WorkStatus terminal_status) {
+bool WorkNCCL::State::setTerminalStatus(
+    WorkStatus terminal_status,
+    const std::exception_ptr& terminal_exception) {
   TORCH_INTERNAL_ASSERT(
       terminal_status == WorkStatus::COMPLETED ||
       terminal_status == WorkStatus::TIMEDOUT ||
       terminal_status == WorkStatus::ERROR);
 
+  std::unique_lock<std::mutex> generationLock(
+      generationState->mutex, std::defer_lock);
+  if (terminal_status == WorkStatus::COMPLETED) {
+    generationLock.lock();
+    if (generationState->invalidated) {
+      return false;
+    }
+  }
   std::lock_guard<std::mutex> lock(terminalStatusMutex);
   WorkStatus current = status();
   if (current == WorkStatus::COMPLETED || current == WorkStatus::TIMEDOUT ||
@@ -203,8 +214,10 @@ bool WorkNCCL::State::setTerminalStatus(WorkStatus terminal_status) {
         "Watchdog caught collective operation timeout: NCCL operation "
         "timed out"));
   } else if (terminal_status == WorkStatus::ERROR) {
-    workException = std::make_exception_ptr(
-        C10_BUILD_ERROR(DistBackendError, "NCCL operation failed"));
+    workException = terminal_exception
+        ? terminal_exception
+        : std::make_exception_ptr(
+              C10_BUILD_ERROR(DistBackendError, "NCCL operation failed"));
   }
   workStatus.store(terminal_status, std::memory_order_release);
   return true;
@@ -221,7 +234,7 @@ void WorkNCCL::State::publishResult() {
   // Exactly once, by whichever of the watchdog and a caller of the Work's own
   // status methods gets here first. The future's callbacks run inline and may
   // take locks of their own, including the GIL, so callers hold no lock --
-  // except reconfigure, which holds reconfigure_mutex_ and revoke_mutex_.
+  // except reconfigure()'s finalize(), which holds reconfigure()'s locks.
   if (resultPublished.exchange(true, std::memory_order_acq_rel)) {
     return;
   }
@@ -456,7 +469,8 @@ bool WorkNCCL::wait(std::chrono::milliseconds timeout) {
   }
 
   WorkStatus current = checkStatus(wait_timeout);
-  if (state_->blockingWait &&
+  // Cancelled by reconfigure(): not a failure of the current communicator.
+  if (state_->blockingWait && !state_->generationState->invalidated &&
       (current == WorkStatus::TIMEDOUT || current == WorkStatus::ERROR)) {
     state_->comm->handleBlockingWaitFailure(current, state_->reconfigureUuid);
   }

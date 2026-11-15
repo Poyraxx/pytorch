@@ -23,6 +23,7 @@
 #include <optional>
 #include <queue>
 #include <set>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -445,8 +446,16 @@ class TORCH_API ProcessGroupNCCL : public ::c10d::Backend {
   // Serializes revokeNcclComm() with reconfigure()'s teardown, so abort() on
   // another thread cannot still be inside commRevoke when the comm is aborted.
   std::mutex revoke_mutex_;
+  std::atomic<bool> reconfiguring_{false};
+  // Held shared from createWork() until enqueueWork(). Lock order: this
+  // mutex before reconfigure_mutex_.
+  std::shared_mutex collective_admission_mutex_;
+  // Replaced only while collective_admission_mutex_ is held exclusively.
+  std::shared_ptr<WorkNCCL::GenerationState> work_generation_state_{
+      std::make_shared<WorkNCCL::GenerationState>()};
 
   ncclDataType_t getNcclDataType(const at::Tensor& tensor);
+  std::shared_lock<std::shared_mutex> admitCollective();
   c10::intrusive_ptr<WorkNCCL> createWork(
       cudaStream_t stream,
       std::chrono::milliseconds timeout,
@@ -632,6 +641,7 @@ class TORCH_API ProcessGroupNCCL : public ::c10d::Backend {
   void checkInitialized();
   void checkAndAbortIfTimedOutOrError();
   void checkWorkQueue();
+  void failPendingGeneration(int64_t reconfigure_uuid);
   void drainRetiredGraphWork();
   std::pair<std::chrono::milliseconds, std::chrono::milliseconds>
   applyEphemeralTimeout(std::chrono::milliseconds timeout);

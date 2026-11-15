@@ -8478,6 +8478,13 @@ def _reconfigure(
     """
     Reconfigure ``group`` with a new set of peers for fault tolerance.
 
+    Work issued on ``group`` that has not completed when reconfiguration starts
+    may be cancelled: ``Work.wait()`` then raises ``DistBackendError`` and
+    ``Work.get_future_result()`` reports ``WorkResult.COMM_ERROR``. Operations
+    issued on ``group`` while it runs may be rejected with ``DistBackendError``,
+    and it must not be called concurrently for the same ``group``. If it fails,
+    ``group`` may be left without a communicator until a later call succeeds.
+
     .. warning::
         This API is experimental and subject to change or removal.
 
