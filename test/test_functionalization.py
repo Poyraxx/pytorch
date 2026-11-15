@@ -2011,6 +2011,77 @@ def forward(self, arg0_1, arg1_1, arg2_1):
             x = torch.ones(1, 5)
             out = _functionalize(fn, reapply_views=True, crossref=False)(x)
 
+    def _assert_unfold_mutation_matches_eager(self, f, *inpts):
+        expected = f(*[t.clone() for t in inpts])
+        for reapply_views in (False, True):
+            out = _functionalize(f, reapply_views=reapply_views, crossref=False)(
+                *[t.clone() for t in inpts]
+            )
+            self.assertEqual(out, expected)
+        traced = make_fx(_functionalize(f, reapply_views=True, crossref=False))(
+            *[t.clone() for t in inpts]
+        )
+        self.assertEqual(traced(*[t.clone() for t in inpts]), expected)
+
+    def test_unfold_with_gaps_inplace_keeps_uncovered_elements(self):
+        def f(x):
+            v = x.unfold(1, 1, 5)
+            v.add_(v)
+            return x
+
+        self._assert_unfold_mutation_matches_eager(f, torch.arange(1, 25).reshape(4, 6))
+
+    def test_unfold_with_gaps_inplace_dims_and_steps(self):
+        def make_f(dim, size, step):
+            def f(x):
+                v = x.unfold(dim, size, step)
+                v.mul_(2)
+                return x
+
+            return f
+
+        x = torch.arange(1, 43).reshape(7, 6)
+        for dim, size, step in [(0, 2, 2), (-1, 2, 3), (0, 3, 4), (1, 1, 6), (1, 2, 2)]:
+            with self.subTest(dim=dim, size=size, step=step):
+                self._assert_unfold_mutation_matches_eager(make_f(dim, size, step), x)
+
+    def test_unfold_with_gaps_inplace_noncontiguous_base(self):
+        def f(x):
+            v = x.t().unfold(0, 2, 3)
+            v.mul_(2)
+            return x
+
+        self._assert_unfold_mutation_matches_eager(f, torch.arange(1, 31).reshape(5, 6))
+
+    def test_unfold_with_gaps_inplace_storage_offset(self):
+        def f(x):
+            v = x[1:].unfold(0, 2, 3)
+            v.mul_(2)
+            return x
+
+        self._assert_unfold_mutation_matches_eager(f, torch.arange(1, 12))
+
+    def test_unfold_with_gaps_inplace_compile(self):
+        def f(x):
+            v = x.unfold(1, 1, 5)
+            v.add_(v)
+            return x
+
+        x = torch.arange(1, 25).reshape(4, 6)
+        for dynamic in (False, True):
+            compiled = torch.compile(f, backend="aot_eager", dynamic=dynamic)
+            self.assertEqual(compiled(x.clone()), f(x.clone()))
+
+    def test_unfold_single_window_index_fill_keeps_rest(self):
+        def f(x, idx):
+            v = x.view(24).unfold(0, 8, 24)
+            v.index_fill_(1, idx, -1)
+            return x
+
+        self._assert_unfold_mutation_matches_eager(
+            f, torch.arange(1, 25).reshape(4, 6), torch.tensor([0, 3])
+        )
+
     def test_batch_norm(self):
         def f(x, running_mean, running_var):
             with enable_python_dispatcher():

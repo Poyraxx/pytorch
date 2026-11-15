@@ -421,6 +421,17 @@ When using torch.compile (or running functionalization directly), this is banned
 as the behavior is not well defined. Consider cloning the tensor before mutating it, \
 or removing the mutation from your model."
           );
+      if (base.dim() > 0 && size <= step) {
+        // The windows are disjoint, so the unfold is a plain strided view of base.
+        // unfold_backward would zero the elements of base that no window covers.
+        const auto dim = at::maybe_wrap_dim(dimension, base.dim());
+        auto strides = base.sym_strides().vec();
+        const auto dim_stride = strides[dim];
+        strides[dim] = dim_stride * step;
+        strides.push_back(dim_stride);
+        return base.as_strided_scatter_symint(
+            mutated_view, mutated_view.sym_sizes(), strides, base.sym_storage_offset());
+      }
       return unfold_backward(mutated_view, base.sizes(), dimension, size, step);
     }
 }
