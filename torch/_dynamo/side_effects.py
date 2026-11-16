@@ -187,6 +187,19 @@ def _manual_list_update(list_from: list[Any], list_to: list[Any]) -> None:
     list.extend(list_to, list_from)
 
 
+def _restore_ordered_dict(
+    target: collections.OrderedDict[Any, Any],
+    items: tuple[tuple[Any, Any], ...],
+    keys: tuple[Any, ...],
+) -> None:
+    collections.OrderedDict.clear(target)
+    for key, value in items:
+        collections.OrderedDict.__setitem__(target, key, value)
+    if any(stored is not linked for (stored, _), linked in zip(items, keys)):
+        for key in keys:
+            collections.OrderedDict.move_to_end(target, key)
+
+
 def _manual_set_update(set_from: Any, set_to: Any) -> None:
     # Call the set methods directly, not any overridden subclass methods.
     set.clear(set_to)
@@ -1700,6 +1713,32 @@ def _codegen_const_dict_or_set_mutation(ctx: SideEffectReplayContext) -> None:
     #   + only if a key was removed from the input dict
     # (5) update the original dictionary with the dict created in (2)
     if var.has_new_items():
+        if (
+            isinstance(var, variables.OrderedDictVariable)
+            and var.should_reconstruct_all
+        ):
+            if isinstance(
+                var.mutation_type, (ValueMutationExisting, AttributeMutationExisting)
+            ):
+                var.install_dict_order_guard(cg.tx)
+            cg.add_push_null(
+                lambda: cg.load_import_from(__name__, "_restore_ordered_dict")
+            )
+            cg(var.source)
+            # Keep raw storage and linked iteration order separate during replay.
+            for key, value in dict.items(var.items):
+                cg(key.vt)
+                cg(value)
+                cg.append_output(create_instruction("BUILD_TUPLE", arg=2))
+            cg.append_output(create_instruction("BUILD_TUPLE", arg=len(var.items)))
+            for key in var.items:
+                cg(key.vt)
+            cg.append_output(create_instruction("BUILD_TUPLE", arg=len(var.items)))
+            ctx.suffixes.append(
+                [*create_call_function(3, False), create_instruction("POP_TOP")]
+            )
+            ctx.log(var)
+            return
         cg(var.source)  # type: ignore[attr-defined]
         cg.load_method("update")
         cg(var, allow_cache=False)  # Don't codegen via source
@@ -1792,16 +1831,17 @@ def _codegen_user_defined_dict_mutation(ctx: SideEffectReplayContext) -> None:
     var = ctx.var
     if not isinstance(var, variables.UserDefinedDictVariable):
         raise AssertionError(type(var))
+    if isinstance(var, variables.OrderedDictVariable):
+        var.should_reconstruct_all = True
+        _codegen_const_dict_or_set_mutation(ctx)
+        return
     # Do dict related update manually here. The store_attr mutations will be
     # applied later.
     varname_map = {}
     for name in _manual_dict_setitem.__code__.co_varnames:
         varname_map[name] = cg.tx.output.new_var()
 
-    try:
-        mro_index = type(var.value).__mro__.index(collections.OrderedDict)
-    except ValueError:
-        mro_index = type(var.value).__mro__.index(dict)
+    mro_index = type(var.value).__mro__.index(dict)
 
     cg.extend_output(
         [
