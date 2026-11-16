@@ -7,5 +7,6 @@ from . import (
     quantize_tensor,
     reductions,
     scatter_add,
+    symm_mem_fused,
     topk,
 )

@@ -4272,6 +4272,9 @@ class TestImports(TestCase):
                            "torch._native.ops.reductions.kernel_coltile",  # depends on cutlass
                            "torch._native.ops.reductions.ordered",  # depends on cutlass
                            "torch._native.ops.scatter_add",  # depends on cutlass
+                           "torch._native.ops.symm_mem_fused.flydsl_ag",  # depends on flydsl
+                           "torch._native.ops.symm_mem_fused.flydsl_common",  # depends on flydsl
+                           "torch._native.ops.symm_mem_fused.flydsl_kernels",  # depends on flydsl
                            "torch._native.ops.topk",  # depends on cutlass
                            "torch._native.ops.quantize_tensor.blockscaled_tma",  # depends on cutlass
                            "torch._inductor.codegen.cuda",  # depends on cutlass
