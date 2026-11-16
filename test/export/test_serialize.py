@@ -3016,32 +3016,26 @@ class TestPredispatchSerialization(TestCase):
             class Config:
                 factor: int
 
-            # Deregistering a type without a serialized name drops a shared entry.
-            with patch.dict(pytree.SERIALIZED_TYPE_TO_PYTHON_TYPE):
-                pytree.register_constant(Config)
-                try:
-                    Scale = self._scale_function()
+            pytree.register_constant(Config)
+            self.addCleanup(pytree._deregister_pytree_node, Config)
+            Scale = self._scale_function()
 
-                    class ScaleBy(Scale):
-                        @staticmethod
-                        def forward(x, config):
-                            return x * config.factor
+            class ScaleBy(Scale):
+                @staticmethod
+                def forward(x, config):
+                    return x * config.factor
 
-                        @staticmethod
-                        def backward(ctx, grad):
-                            return grad, None
+                @staticmethod
+                def backward(ctx, grad):
+                    return grad, None
 
-                    class Baz(torch.nn.Module):
-                        def forward(self, x):
-                            return ScaleBy.apply(x, Config(3))
+            class Baz(torch.nn.Module):
+                def forward(self, x):
+                    return ScaleBy.apply(x, Config(3))
 
-                    ep = export(Baz(), (torch.randn(4),), strict=False)
-                    with self.assertRaisesRegex(
-                        SerializeError, "input is a pytree constant"
-                    ):
-                        torch.export.save(ep, io.BytesIO())
-                finally:
-                    pytree._deregister_pytree_node(Config)
+            ep = export(Baz(), (torch.randn(4),), strict=False)
+            with self.assertRaisesRegex(SerializeError, "input is a pytree constant"):
+                torch.export.save(ep, io.BytesIO())
 
         def keyed(key):
             Scale = self._scale_function()

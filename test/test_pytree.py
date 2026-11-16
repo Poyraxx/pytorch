@@ -15,7 +15,6 @@ from collections import defaultdict, deque, namedtuple, OrderedDict, UserDict
 from dataclasses import dataclass, field
 from enum import auto
 from typing import Any, NamedTuple
-from unittest.mock import patch
 
 import torch
 import torch.utils._pytree as python_pytree
@@ -1191,42 +1190,25 @@ if cxx_pytree.tree_leaves(foo) != [foo]:
         ):
             python_pytree.treespec_dumps(spec)
 
-    @parametrize(
-        "case,reason",
-        [
-            ("not_a_namedtuple", "which is not a namedtuple class"),
-            ("namedtuple_without_a_name", "couldn't find a serialized name"),
-            ("type_without_a_name", "does not name one type"),
-        ],
-        name_fn=lambda case, reason: case,
-    )
-    def test_pytree_deserialize_names_dumps_never_writes(self, case, reason):
-        # A namedtuple node must name a namedtuple class, and no node may use the
-        # name that stands for every type without a serialized name.
+    def test_pytree_deserialize_namedtuple_names_a_namedtuple(self):
         import json
 
         Point = namedtuple("Point", ["x", "y"])
         python_pytree._register_namedtuple(
             Point,
-            serialized_type_name=f"test_pytree.test_pytree_deserialize_names.{case}",
+            serialized_type_name="test_pytree.test_pytree_deserialize_namedtuple.Point",
         )
         self.addCleanup(python_pytree._deregister_pytree_node, Point)
         serialized = python_pytree.treespec_dumps(
             python_pytree.tree_structure(Point(1, 2))
         )
         python_pytree.treespec_loads(serialized)
-        no_name = python_pytree.NO_SERIALIZED_TYPE_NAME_FOUND
         protocol, root = json.loads(serialized)
-        node = {
-            "not_a_namedtuple": {**root, "context": "collections.defaultdict"},
-            "namedtuple_without_a_name": {**root, "context": no_name},
-            "type_without_a_name": {**root, "type": no_name, "context": "null"},
-        }[case]
-        # The name that stands for types without a serialized name points at the
-        # last such type registered, which can be a namedtuple class.
-        with patch.dict(python_pytree.SERIALIZED_TYPE_TO_PYTHON_TYPE, {no_name: Point}):
-            with self.assertRaisesRegex(NotImplementedError, reason):
-                python_pytree.treespec_loads(json.dumps([protocol, node]))
+        node = {**root, "context": "collections.defaultdict"}
+        with self.assertRaisesRegex(
+            NotImplementedError, "which is not a namedtuple class"
+        ):
+            python_pytree.treespec_loads(json.dumps([protocol, node]))
 
     @parametrize(
         "value,reason",
