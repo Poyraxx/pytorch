@@ -924,10 +924,23 @@ def _find_in_spec(spec: pytree.TreeSpec, pred: Callable[..., bool]) -> bool:
     return pred(spec) or any(_find_in_spec(c, pred) for c in spec.children())
 
 
-def _has_enum_key(spec: pytree.TreeSpec) -> bool:
-    # Load refuses a plain enum key, and JSON writes others as their base type.
-    keys = spec.context if spec.type in (dict, OrderedDict) else ()
-    return any(isinstance(k, Enum) for k in keys)
+def _has_enum(spec: pytree.TreeSpec) -> bool:
+    # Load refuses a plain enum, and JSON writes others as their base type. A
+    # context goes through JSON only if its type has no encoder of its own.
+    node_def = pytree.SUPPORTED_SERIALIZED_TYPES.get(spec.type)
+    if node_def is None or node_def.to_dumpable_context is not None:
+        return False
+
+    def walk(obj: object) -> bool:
+        if isinstance(obj, Enum):
+            return True
+        if isinstance(obj, dict):
+            return any(walk(k) or walk(v) for k, v in obj.items())
+        if isinstance(obj, (list, tuple)):
+            return any(walk(o) for o in obj)
+        return False
+
+    return walk(spec.context)
 
 
 def _find_flat_apply_func(
@@ -1628,7 +1641,7 @@ class GraphModuleSerializer(metaclass=Final):
                 f"Cannot serialize flat_apply node {node.name}: its input spec "
                 f"cannot be saved: {e}"
             ) from e
-        if loaded_spec != in_spec_value or _find_in_spec(in_spec_value, _has_enum_key):
+        if loaded_spec != in_spec_value or _find_in_spec(in_spec_value, _has_enum):
             raise SerializeError(
                 f"Cannot serialize flat_apply node {node.name}: its input spec "
                 "would load back different, because JSON cannot store a part of "

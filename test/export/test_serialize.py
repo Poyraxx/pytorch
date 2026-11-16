@@ -3037,23 +3037,22 @@ class TestPredispatchSerialization(TestCase):
             with self.assertRaisesRegex(SerializeError, "input is a pytree constant"):
                 torch.export.save(ep, io.BytesIO())
 
-        def keyed(key):
+        def wrapped(wrap, unwrap):
             Scale = self._scale_function()
 
-            class ByKey(Scale):
+            class Unwrap(Scale):
                 @staticmethod
-                def forward(d):
-                    return d[key] * 2
+                def forward(arg):
+                    return unwrap(arg) * 2
 
-                @staticmethod
-                def backward(ctx, grad):
-                    return None
-
-            class UsesKey(torch.nn.Module):
+            class Wraps(torch.nn.Module):
                 def forward(self, x):
-                    return ByKey.apply({key: x})
+                    return Unwrap.apply(wrap(x))
 
-            return export(UsesKey(), (torch.randn(4),), strict=False)
+            return export(Wraps(), (torch.randn(4),), strict=False)
+
+        def keyed(key):
+            return wrapped(lambda x: {key: x}, lambda d: d[key])
 
         with self.subTest("enum in an input"):
             # Load would import the module of the enum, so save refuses it.
@@ -3068,6 +3067,32 @@ class TestPredispatchSerialization(TestCase):
             for key in ((0, 1), enum.Enum("FloatKey", {"A": 0.5}, type=float).A):
                 with self.assertRaisesRegex(SerializeError, "load back different"):
                     torch.export.save(keyed(key), io.BytesIO())
+
+        with self.subTest("str enum in the context of a registered type"):
+            # It would load back as a plain str, which compares equal to it.
+            mode = enum.Enum("Mode", {"FAST": "fast"}, type=str).FAST
+
+            # With its own context encoder, a type keeps the enum, so save stops
+            # later, at the class defined in this test or in __main__.
+            coded = dict(
+                to_dumpable_context=str, from_dumpable_context=lambda _: [mode]
+            )
+            for encoder, error in (({}, "load back"), (coded, "top-level|__main__")):
+
+                class Box:
+                    def __init__(self, x):
+                        self.x = x
+
+                pytree.register_pytree_node(
+                    Box,
+                    lambda box: ([box.x], [mode]),
+                    lambda xs, context: Box(xs[0]),
+                    serialized_type_name=f"flat_apply_test.Box{len(encoder)}",
+                    **encoder,
+                )
+                self.addCleanup(pytree._deregister_pytree_node, Box)
+                with self.assertRaisesRegex(SerializeError, error):
+                    torch.export.save(wrapped(Box, lambda box: box.x), io.BytesIO())
 
     def test_predispatch_flat_apply_save_load_by_name(self):
         Scale = self._scale_function()
