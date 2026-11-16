@@ -1,5 +1,5 @@
 # mypy: allow-untyped-defs
-"""Pieces of the FlyDSL fused all-gather + matmul (flydsl_ag) state that the other fused ops share.
+"""Pieces shared by the FlyDSL fused all-gather + matmul (flydsl_ag) and matmul + reduce-scatter (flydsl_rs) states.
 
 Imported on the first admitted call only (flydsl_impl._kernels): it pulls in flydsl and the vendored GEMM. The parts
 that need neither are in _common.
@@ -42,7 +42,7 @@ def control_block(device, ms):
 
 def order_streams(st):
     """Order this call on state `st` (current device) after the state's previous call: a state's epoch and staging
-    assume in-order calls (one state on two unordered streams hangs the AG); different states are
+    assume in-order calls (one state on two unordered streams hangs the AG and corrupts the RS); different states are
     independent. Under CUDA graph capture nothing is waited on: torch.cuda.graph synchronizes before capture, and a
     capturing stream may not wait on uncaptured work, so within one capture keep a state's calls on one stream. Nor
     is a replay ordered against eager calls: don't replay a graph while eager calls (or another replay) on the same
