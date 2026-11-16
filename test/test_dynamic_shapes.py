@@ -3987,6 +3987,7 @@ class TestDimConstraints(TestCase):
         dim_constraints.add(s0 >= 2)
         dim_constraints.add(s1 >= 2)
         dim_constraints.add(s6 >= 2)
+        dim_constraints.size_bounds.append((sympy.Le, s6, Integer(32)))
         dim_constraints.add(s5 >= 2)
 
         dim_constraints.solve()
@@ -4009,6 +4010,7 @@ class TestDimConstraints(TestCase):
             dim_constraints._dynamic_results,
             {
                 "2 <= L['c'].size()[1]",
+                "L['c'].size()[1] <= 32",
                 "L['d'].size()[1] == L['c'].size()[1]",
                 "L['e'].size()[1] == L['c'].size()[1]",
             },

@@ -871,6 +871,7 @@ def _sympy_from_args(
         return cls._from_args(args, is_commutative=is_commutative)  # type: ignore[attr-defined]
 
 
+@lru_cache(256)
 def _canonicalize_bool_expr_impl(expr: SympyBoolean) -> SympyBoolean:
     """
     After canonicalization, supported relations have Ge/Gt rewritten to Le/Lt.
@@ -3242,6 +3243,8 @@ class DimConstraints:
 
         # symbols that are marked dynamic
         self._marked_dynamic = marked_dynamic
+        # Runtime guards use the bounds directly. Build the solver's inequalities on demand.
+        self.size_bounds: list[tuple[type[Relational], sympy.Symbol, sympy.Expr]] = []
 
         # track supported sympy functions and subtract from list of all sympy functions
         self._supported_sympy_functions: set[sympy.Function] = {
@@ -3466,6 +3469,9 @@ class DimConstraints:
 
     def solve(self) -> None:
         """Solve the system of constraint equations to find simplified constraints"""
+        for op, symbol, bound in self.size_bounds:
+            self.add(op(symbol, bound))
+        self.size_bounds.clear()
         self._raise_inconsistencies()
         # as long as there are symbols with equalities, solve for them
         # NOTE(avik): this is guaranteed to terminate (#iterations <= #symbols)
@@ -6023,8 +6029,8 @@ class ShapeEnv:
 
             if isinstance(val, int):
                 if positive:
-                    # Add assertions for the newly created symbols
-                    self._add_assertion(sympy_expr > 1)
+                    if self._translation_validation_enabled:
+                        self._add_assertion(sympy_expr > 1)
 
                     # Apply default range, which assumes not zero-one
                     self.var_to_range[sympy_expr] = self._default_value_range(
@@ -6926,7 +6932,7 @@ class ShapeEnv:
             verbose_expr = ""
             if r.lower not in (-sympy.oo, -int_oo):
                 if any(is_dim(source) for source in sources):
-                    self.dim_constraints.add(sympy.Ge(symbol, r.lower))
+                    self.dim_constraints.size_bounds.append((sympy.Ge, symbol, r.lower))
                 # Only print lower bound in simplified mode if it is not the
                 # default
                 if not _simplified or r.lower != self._default_value_range().lower:
@@ -6934,7 +6940,7 @@ class ShapeEnv:
                 verbose_expr = f"{r.lower} <= {rf}  # {vr_sloc.lower}"
             if r.upper not in (sympy.oo, int_oo):
                 if any(is_dim(source) for source in sources):
-                    self.dim_constraints.add(sympy.Le(symbol, r.upper))
+                    self.dim_constraints.size_bounds.append((sympy.Le, symbol, r.upper))
                 # nontrivial upper bound is always interesting
                 bounds.append(sympy.Le(symbol, r.upper, evaluate=False))
                 if verbose_expr:
@@ -6942,12 +6948,14 @@ class ShapeEnv:
                 else:
                     verbose_expr = f"{rf} <= {r.upper}  # {vr_sloc.upper}"
             if bounds:
-                bound = sympy.And(*bounds, evaluate=False)
-
                 for exprs, printer, lang in zip(all_exprs, printers, langs):
                     if lang == "verbose_python":
                         exprs.append(verbose_expr)
+                    elif lang == "python" and len(bounds) == 2 and r.is_int:
+                        # Read the source once for both endpoints of the interval.
+                        exprs.append(f"{r.lower} <= {rf} <= {r.upper}")
                     else:
+                        bound = sympy.And(*bounds, evaluate=False)
                         exprs.append(printer.doprint(bound))
                 # NB: verbose_exprs are done above
 
@@ -7353,9 +7361,10 @@ class ShapeEnv:
             )
         return tuple(dict.fromkeys(axioms).keys())
 
-    @lru_cache(None)
+    @staticmethod
+    @lru_cache(256)
     def get_implications(
-        self, e: SympyBoolean
+        e: SympyBoolean,
     ) -> tuple[tuple[SympyBoolean, sympy.logic.boolalg.BooleanAtom], ...]:
         """Given a expression, it returns a list of predicates that follow from it"""
         equiv: dict[SympyBoolean, sympy.logic.boolalg.BooleanAtom] = {}
@@ -8106,7 +8115,7 @@ class ShapeEnv:
             changed = True
         else:
             old = self.var_to_range[symbol]
-            new = old & vr
+            new = vr if vr.is_int and old.is_int and vr.issubset(old) else old & vr
             changed = new != old
             if changed:
                 if vr_sloc is None:
